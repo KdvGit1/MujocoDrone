@@ -1,0 +1,224 @@
+<mujoco model="whoop_drone">
+  <!--
+    65mm Whoop Drone MuJoCo Model
+    =============================
+    Mass       : 50g total
+    Frame      : X configuration, 65mm motor-to-motor diagonal
+    Motors     : 4x brushless (0802/1102 class)
+    Max thrust : ~0.245 N (~25g) per motor  →  hover at ~50% throttle
+    Yaw torque : 0.013 N·m per motor at max throttle (Cm/Ct ≈ 0.053)
+
+    Motor layout (top view):
+      FL (+x,+y) CCW   FR (+x,-y) CW
+            \          /
+             \        /
+              --------  (center)
+             /        \
+            /          \
+      BL (-x,+y) CW   BR (-x,-y) CCW
+
+    Coordinate frame: x=forward, y=left, z=up
+    Action order: [FL, FR, BL, BR] each in [0, 1]
+
+    === TUNING GUIDE ===
+    If drone oscillates  → reduce thrust/torque gear values
+    If drone is sluggish → increase gear values or reduce inertia
+    Update 'diaginertia' after weighing real drone components.
+    Update gear values after measuring motor thrust on a thrust stand.
+  -->
+
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.002"
+          gravity="0 0 -9.81"
+          integrator="RK4"
+          cone="elliptic"
+          impratio="10"/>
+
+  <default>
+    <geom contype="1" conaffinity="1" condim="3"
+          friction="0.7 0.005 0.0001" solimp="0.9 0.95 0.001"/>
+    <joint damping="0.0001"/>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient"
+             rgb1=".4 .6 .8" rgb2="0 0 0"
+             width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker"
+             rgb1=".15 .25 .35" rgb2=".25 .35 .45"
+             width="512" height="512" mark="edge" markrgb=".3 .4 .5"/>
+    <material name="grid" texture="grid"
+              texrepeat="4 4" texuniform="true" reflectance="0.1"/>
+    <material name="frame_mat"  rgba="0.12 0.12 0.75 1.0"/>
+    <material name="fc_mat"     rgba="0.15 0.75 0.15 1.0"/>
+    <material name="motor_ccw"  rgba="0.1 0.1 0.1 1.0"/>
+    <material name="motor_cw"   rgba="0.75 0.1 0.1 1.0"/>
+    <material name="prop_mat"   rgba="0.4 0.4 0.4 0.6"/>
+  </asset>
+
+  <worldbody>
+    <light name="sun"    pos="0 0 5"   dir="0 0 -1"  diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2"/>
+    <light name="fill"   pos="3 -3 4"  dir="-1 1 -2" diffuse="0.3 0.3 0.3"/>
+
+    <!-- Ground plane -->
+    <geom name="floor" type="plane" size="25 25 0.1"
+          material="grid" zaxis="0 0 1" contype="1" conaffinity="1"/>
+
+    <!-- ================================================================
+         Drone body  –  freejoint so it can move freely in space
+         Initial position: 1 m above ground
+         ================================================================ -->
+    <body name="drone" pos="0 0 1.0">
+      <freejoint name="drone_freejoint"/>
+
+      <!--
+        Inertial properties (50g whoop estimate)
+        I_xx = I_yy ≈ 2.5e-5 kg·m²  (roll/pitch – thin disk formula)
+        I_zz         ≈ 4.0e-5 kg·m²  (yaw)
+        Measure with a bifilar pendulum for accurate values.
+      -->
+      <inertial mass="0.050"
+                pos="0 0 0"
+                diaginertia="2.5e-5 2.5e-5 4.0e-5"/>
+
+      <!-- ---- Frame arms (X configuration, ±45°) ---- -->
+      <!-- arm from BL(-,+) to FR(+,-) direction -->
+      <geom name="arm_1" type="box"
+            size="0.0230 0.0035 0.0025"
+            euler="0 0  0.7854"
+            material="frame_mat" contype="0" conaffinity="0"/>
+      <!-- arm from FL(+,+) to BR(-,-) direction -->
+      <geom name="arm_2" type="box"
+            size="0.0230 0.0035 0.0025"
+            euler="0 0 -0.7854"
+            material="frame_mat" contype="0" conaffinity="0"/>
+
+      <!-- Central FC/ESC stack (visual) -->
+      <geom name="fc" type="box"
+            size="0.014 0.014 0.005"
+            pos="0 0 0.003"
+            material="fc_mat" contype="0" conaffinity="0"/>
+
+      <!-- ============================================================
+           Motor FL  (+x, +y)  CCW  – black caps
+           ============================================================ -->
+      <geom name="motor_fl" type="cylinder"
+            size="0.0055 0.006"
+            pos="0.0325 0.0325 0.003"
+            material="motor_ccw"/>
+      <!-- Propeller FL (visual, no collision) -->
+      <geom name="prop_fl" type="cylinder"
+            size="0.038 0.0008"
+            pos="0.0325 0.0325 0.010"
+            material="prop_mat"
+            contype="0" conaffinity="0"/>
+      <!-- Thrust application site for FL -->
+      <site name="site_fl" pos="0.0325 0.0325 0.010"
+            zaxis="0 0 1" size="0.002"/>
+
+      <!-- ============================================================
+           Motor FR  (+x, -y)  CW   – red caps
+           ============================================================ -->
+      <geom name="motor_fr" type="cylinder"
+            size="0.0055 0.006"
+            pos="0.0325 -0.0325 0.003"
+            material="motor_cw"/>
+      <geom name="prop_fr" type="cylinder"
+            size="0.038 0.0008"
+            pos="0.0325 -0.0325 0.010"
+            material="prop_mat"
+            contype="0" conaffinity="0"/>
+      <site name="site_fr" pos="0.0325 -0.0325 0.010"
+            zaxis="0 0 1" size="0.002"/>
+
+      <!-- ============================================================
+           Motor BL  (-x, +y)  CW   – red caps
+           ============================================================ -->
+      <geom name="motor_bl" type="cylinder"
+            size="0.0055 0.006"
+            pos="-0.0325 0.0325 0.003"
+            material="motor_cw"/>
+      <geom name="prop_bl" type="cylinder"
+            size="0.038 0.0008"
+            pos="-0.0325 0.0325 0.010"
+            material="prop_mat"
+            contype="0" conaffinity="0"/>
+      <site name="site_bl" pos="-0.0325 0.0325 0.010"
+            zaxis="0 0 1" size="0.002"/>
+
+      <!-- ============================================================
+           Motor BR  (-x, -y)  CCW  – black caps
+           ============================================================ -->
+      <geom name="motor_br" type="cylinder"
+            size="0.0055 0.006"
+            pos="-0.0325 -0.0325 0.003"
+            material="motor_ccw"/>
+      <geom name="prop_br" type="cylinder"
+            size="0.038 0.0008"
+            pos="-0.0325 -0.0325 0.010"
+            material="prop_mat"
+            contype="0" conaffinity="0"/>
+      <site name="site_br" pos="-0.0325 -0.0325 0.010"
+            zaxis="0 0 1" size="0.002"/>
+
+      <!-- IMU site at drone CoM -->
+      <site name="imu" pos="0 0 0" zaxis="0 0 1" size="0.001"/>
+    </body>
+  </worldbody>
+
+  <!-- ================================================================
+       Actuators
+       ================================================================
+       gear = [fx, fy, fz, tx, ty, tz]  in site LOCAL frame.
+       control ∈ [0, 1]  →  force = gear * control
+
+       thrust_max  = 0.245 N   (≈25g per motor)
+         • hover = 0.05 kg × 9.81 m/s² / 4 = 0.123 N  → 50% throttle ✓
+         • T/W at full throttle ≈ 2.0  (good stability margin)
+
+       torque_max  = 0.013 N·m (yaw reaction torque, Cm/Ct × thrust_max)
+         • CCW motors (FL, BR) → positive tz
+         • CW  motors (FR, BL) → negative tz
+
+       To update for real motors, measure thrust on a stand and replace
+       0.245 with measured value.  Keep torque_max ≈ 0.053 × thrust_max.
+  -->
+  <actuator>
+    <!-- FL: CCW → +tz -->
+    <general name="motor_fl" site="site_fl"
+             gear="0 0 0.245 0 0  0.013"
+             ctrllimited="true" ctrlrange="0 1"/>
+
+    <!-- FR: CW  → -tz -->
+    <general name="motor_fr" site="site_fr"
+             gear="0 0 0.245 0 0 -0.013"
+             ctrllimited="true" ctrlrange="0 1"/>
+
+    <!-- BL: CW  → -tz -->
+    <general name="motor_bl" site="site_bl"
+             gear="0 0 0.245 0 0 -0.013"
+             ctrllimited="true" ctrlrange="0 1"/>
+
+    <!-- BR: CCW → +tz -->
+    <general name="motor_br" site="site_br"
+             gear="0 0 0.245 0 0  0.013"
+             ctrllimited="true" ctrlrange="0 1"/>
+  </actuator>
+
+  <!-- ================================================================
+       Sensors (mirrors GY-91 outputs)
+       ================================================================ -->
+  <sensor>
+    <!-- Accelerometer & gyro at IMU site (body frame) -->
+    <accelerometer name="imu_accel" site="imu"/>
+    <gyro          name="imu_gyro"  site="imu"/>
+
+    <!-- Ground truth state (for RL observation) -->
+    <framepos    name="drone_pos"     objtype="body" objname="drone"/>
+    <framequat   name="drone_quat"    objtype="body" objname="drone"/>
+    <framelinvel name="drone_linvel"  objtype="body" objname="drone"/>
+    <frameangvel name="drone_angvel"  objtype="body" objname="drone"/>
+  </sensor>
+
+</mujoco>

@@ -1,0 +1,65 @@
+# ───────────────────────────────────────────────────────────────
+#  Whoop Drone  –  PPO Training Configuration
+#  Edit this file to tune training without touching Python code.
+# ───────────────────────────────────────────────────────────────
+
+training:
+  n_envs:            8           # Parallel training envs (use 1 for debugging)
+  total_timesteps:   500_000   # Increase to 10M for longer training
+  log_dir:           "logs/whoop_hover"
+  save_dir:          "models/trained"
+  checkpoint_freq:   100_000     # Steps between checkpoints
+  eval_freq:         50_000      # Steps between evaluations
+  seed:              42
+  run_name:          "whoop_hover_ppo"
+
+ppo:
+  policy:           "MlpPolicy"
+  learning_rate:    3.0e-4
+  n_steps:          2048         # Steps per env per update
+  batch_size:       64
+  n_epochs:         10
+  gamma:            0.99
+  gae_lambda:       0.95
+  clip_range:       0.2
+  ent_coef:         0.001        # Small entropy bonus for exploration
+  vf_coef:          0.5
+  max_grad_norm:    0.5
+  net_arch_pi:      [256, 256]   # Policy network hidden layers
+  net_arch_vf:      [256, 256]   # Value network hidden layers
+
+# ───────────────────────────────────────────────────────────────
+#  Drone physical parameters
+#  Update these AFTER measuring the real drone (thrust stand, scale)
+# ───────────────────────────────────────────────────────────────
+drone:
+  mass_kg:                   0.050    # Total all-up weight
+  max_thrust_per_motor_N:    0.245    # ~25 g per motor at max throttle
+  arm_m:                     0.0325   # Motor-to-centre distance (each axis)
+
+  # hover_throttle = mass * g / (4 * max_thrust)
+  #               = 0.05 * 9.81 / (4 * 0.245) = 0.50  (50 % throttle)
+
+  # Inertia tensor (diagonal, kg·m²)
+  # Estimated for a 65 mm whoop using thin-disk approximation.
+  # Use a bifilar pendulum for accurate values.
+  ixx: 2.5e-5
+  iyy: 2.5e-5
+  izz: 4.0e-5
+
+  # Yaw torque coefficient  Cm / Ct ≈ 0.053
+  #   torque_max = Cm_over_Ct * thrust_max = 0.013 N·m
+  torque_max_Nm: 0.013
+
+# ───────────────────────────────────────────────────────────────
+#  Hover task parameters
+# ───────────────────────────────────────────────────────────────
+task:
+  hover_target:      [0.0, 0.0, 1.0]   # metres  [x, y, z]
+  max_episode_steps: 1000              # 1000 × 10 substeps × 0.002 s = 20 s
+
+  # Termination thresholds
+  crash_z_m:         0.03     # crash if z < 0.03 m
+  flip_quat_w:       0.30     # emergency stop if |w| < 0.30  (≈ 107° tilt)
+  max_range_xy_m:    10.0     # emergency stop if |x| or |y| > 10 m
+  max_z_m:           20.0     # emergency stop if z > 20 m
