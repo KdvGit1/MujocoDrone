@@ -21,10 +21,10 @@ from .drone_env import WhoopDroneEnv
 
 class WhoopDroneEnvDR(WhoopDroneEnv):
     # ── Randomization ranges ─────────────────────────────────────────────────
-    DR_THRUST_RANGE  = (0.85, 1.15)   # ±15% per motor
-    DR_MASS_RANGE    = (0.90, 1.10)   # ±10% total mass
-    DR_WIND_MAX      = 0.8            # m/s max per axis
-    DR_OBS_NOISE_STD = 0.01           # Gaussian std added to every obs dim
+    DR_THRUST_RANGE  = (0.90, 1.10)   # ±10% per motor
+    DR_MASS_RANGE    = (0.95, 1.05)   # ±5% total mass
+    DR_WIND_MAX      = 0.4            # m/s max per axis
+    DR_OBS_NOISE_STD = 0.005          # Gaussian std added to every obs dim
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

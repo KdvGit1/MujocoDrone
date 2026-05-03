@@ -1,0 +1,50 @@
+tensorboard --logdir logs
+
+## rollout/ — Çevreden toplanan ham veriler
+
+**`ep_len_mean = 11.5`** — Ortalama episode uzunluğu. Drone ortalama 11.5 adımda çöküyor. 1000 adım = 20 saniye olması gerekiyor. Bu değer hâlâ çok düşük — delta action düzeltmesine rağmen drone erken ölüyor. Eğitim ilerledikçe bu değer yükselmeli. **İyi işaret:** en azından sabit kalıyor, tamamen rastgele değil.
+
+**`ep_rew_mean = -95.6`** — Ortalama toplam ödül. Negatif ama bu normal, ödül fonksiyonu tasarım gereği negatif başlıyor. Eğitim ilerledikçe sıfıra yaklaşmalı.
+
+---
+
+## time/ — Eğitim hızı
+
+**`fps = 1133`** — Saniyede 1133 simülasyon adımı işleniyor. 8 paralel env ile gayet iyi.
+
+**`iterations = 2`** — PPO kaç kez rollout + güncelleme döngüsü yaptı. Her iteration = 8 env × 2048 adım = 16384 timestep.
+
+**`total_timesteps = 32768`** — Toplam 5M adımın sadece ~33k'sı bitti. Çok erken, henüz hiçbir şey öğrenilmedi.
+
+---
+
+## train/ — PPO'nun öğrenme kalitesi
+
+**`approx_kl = 0.019`** — Eski ve yeni policy arasındaki fark. 0.01–0.05 arası sağlıklı. Çok yüksekse (>0.1) güncelleme çok agresif demek.
+
+**`clip_fraction = 0.28`** — Adımların %28'i PPO clip mekanizması tarafından kesildi. İdeal aralık %10–30. Biraz yüksek ama kabul edilebilir — daha fazla öğrenme baskısı olduğunu gösterir.
+
+**`entropy_loss = 0.371`** — Politikanın ne kadar "rastgele" olduğu. Yüksek = çok exploration. Zamanla azalmalı, ancak sıfıra düşmemeli (o zaman lokal minimuma takılır).
+
+**`explained_variance = -0.079`** ⚠️ — **En önemli uyarı işareti.** Value function'ın ne kadar doğru tahmin ettiğini gösterir. 1.0 = mükemmel, 0 = rastgele tahmin, **negatif = rastgelenden bile kötü.** Bu tamamen normaldir eğitimin başında — model hiç görmediği durumları tahmin etmeye çalışıyor. Eğitim ilerledikçe 0.8+ olmalı.
+
+**`loss = 0.104`** — Toplam PPO kaybı. Tek başına pek anlamlı değil, trend önemli.
+
+**`policy_gradient_loss = -0.014`** — Negatif olması normal ve istenen durum — policy iyileşiyor demek.
+
+**`std = 0.22`** — Politikanın çıktısının standart sapması. `log_std_init=-1.5` ayarından geliyor (e^-1.5 ≈ 0.22). Bu değer eğitim boyunca azalmalı — drone öğrendikçe daha az rastgele hareket etmeli.
+
+**`value_loss = 0.573`** — Value function ne kadar yanlış tahmin ediyor. Başlangıç için normal, zamanla düşmeli.
+
+---
+
+## Ne izlemeli?
+
+| Metrik               | Hedef (1M+ step'te) |
+| `ep_len_mean`        | 500+ |
+| `ep_rew_mean`        |-10 ile 0 arası |
+| `explained_variance` |0.8+ |
+| `std`                |0.05–0.10 |
+| `clip_fraction`      |0.10–0.20 |
+
+`ep_len_mean`'in ilk 500k timestep içinde belirgin biçimde yükselmeye başlaması gerekiyor. Eğer 1M adımda hâlâ 20'nin altındaysa başka bir sorun var demektir.

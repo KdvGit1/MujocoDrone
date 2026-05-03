@@ -58,14 +58,48 @@ def evaluate(
     challenge:     bool  = False,
     cmd_interval:  int   = 150,    # steps between random commands
     cmd_radius:    float = 1.5,    # m – max XY radius of target waypoints
+    vec_norm_override: str = None, # explicit path to vec_normalize.pkl
 ):
     # ── Resolve vec normalise stats ───────────────────────────────────────────
-    model_dir     = os.path.dirname(model_path)
-    vec_norm_path = os.path.join(model_dir, "vec_normalize.pkl")
-    if not os.path.exists(vec_norm_path):
-        vec_norm_path = os.path.join(
-            os.path.dirname(model_dir), "vec_normalize.pkl"
-        )
+    import glob as _glob
+    model_dir = os.path.dirname(model_path)
+
+    def _find_vec_norm(model_dir: str, model_path: str) -> str:
+        """Search for VecNormalize stats using multiple heuristics."""
+        candidates = []
+
+        # 1. Exact legacy name
+        candidates.append(os.path.join(model_dir, "vec_normalize.pkl"))
+        candidates.append(os.path.join(os.path.dirname(model_dir), "vec_normalize.pkl"))
+
+        # 2. Infer from model filename: "stage2_dr_final.zip" → "vec_normalize_stage2_dr.pkl"
+        stem = os.path.splitext(os.path.basename(model_path))[0]  # e.g. "stage2_dr_final"
+        for suffix in ("_final", "_best"):
+            if stem.endswith(suffix):
+                run_name = stem[: -len(suffix)]
+                candidates.append(os.path.join(model_dir, f"vec_normalize_{run_name}.pkl"))
+
+        # 3. Checkpoint naming: "stage2_dr_5000000_steps.zip" → "stage2_dr_vecnormalize_5000000_steps.pkl"
+        import re as _re
+        m = _re.match(r"^(.+)_(\d+)_steps$", stem)
+        if m:
+            run_name, steps = m.group(1), m.group(2)
+            candidates.append(
+                os.path.join(model_dir, f"{run_name}_vecnormalize_{steps}_steps.pkl")
+            )
+
+        # 4. Glob fallback: any vec_normalize*.pkl in the model directory
+        for p in sorted(_glob.glob(os.path.join(model_dir, "vec_normalize*.pkl"))):
+            candidates.append(p)
+
+        for c in candidates:
+            if c and os.path.exists(c):
+                return c
+        return None
+
+    vec_norm_path = _find_vec_norm(model_dir, model_path)
+    if vec_norm_override:
+        vec_norm_path = vec_norm_override
 
     # ── Build environment ─────────────────────────────────────────────────────
     render_mode = "human" if render and video_path is None else (
@@ -74,13 +108,14 @@ def evaluate(
     raw_env = WhoopDroneEnv(render_mode=render_mode)
     vec_env = DummyVecEnv([lambda: raw_env])
 
-    if os.path.exists(vec_norm_path):
+    if vec_norm_path is not None:
         print(f"[eval] Loading VecNormalize from {vec_norm_path}")
         vec_env            = VecNormalize.load(vec_norm_path, vec_env)
         vec_env.training   = False
         vec_env.norm_reward = False
     else:
-        print("[eval] No vec_normalize.pkl found – running without normalisation.")
+        print("[eval] WARNING: No vec_normalize.pkl found – running without normalisation.")
+        print("[eval]          Pass --vec-normalize <path.pkl> to fix this.")
 
     # ── Load model ────────────────────────────────────────────────────────────
     model = PPO.load(model_path, device="cpu")
@@ -113,6 +148,13 @@ def evaluate(
     rng = np.random.default_rng(42)
 
     for ep in range(n_episodes):
+        # Reset target to origin before each episode so the drone spawns
+        # near [0,0,1] regardless of where the previous episode's challenge
+        # target ended up (avoids cross-episode spawn-position drift).
+        if challenge:
+            raw_env.target_pos = np.array([0.0, 0.0, 1.0])
+            raw_env.target_yaw = 0.0
+
         obs     = vec_env.reset()
         done    = False
         total_r = 0.0
@@ -244,6 +286,7 @@ if __name__ == "__main__":
     parser.add_argument("--episodes",     type=int,   default=5,    help="Number of evaluation episodes")
     parser.add_argument("--no-render",    action="store_true",       help="Disable MuJoCo viewer")
     parser.add_argument("--video",        default=None,              help="Save video to this path (e.g. out.mp4)")
+    parser.add_argument("--vec-normalize",  default=None,              help="Path to VecNormalize .pkl (auto-detected if omitted)")
     parser.add_argument("--challenge",    action="store_true",       help="Enable random-command challenge mode")
     parser.add_argument("--cmd-interval", type=int,   default=150,   help="[challenge] Steps between forced new commands")
     parser.add_argument("--cmd-radius",   type=float, default=1.5,   help="[challenge] Max XY radius of random targets (m)")
@@ -257,5 +300,6 @@ if __name__ == "__main__":
         challenge    = args.challenge,
         cmd_interval = args.cmd_interval,
         cmd_radius   = args.cmd_radius,
+        vec_norm_override = args.vec_normalize,
     )
 

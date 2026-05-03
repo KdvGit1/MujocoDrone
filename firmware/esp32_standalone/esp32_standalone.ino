@@ -15,7 +15,8 @@
  *   4. First test with PROPS REMOVED.
  *
  * UDP Protocol:
- *   PC -> ESP32  (12 bytes)  float[3] = {target_x, target_y, target_z}
+ *   PC -> ESP32  (16 bytes)  float[4] = {target_x, target_y, target_z, target_yaw}
+ *                             Special: z=-1.0 = kill,  z=-2.0 = IMU recalibrate
  *   ESP32 -> PC  (28 bytes)  float[7] = {ax, ay, az, gx, gy, gz, altitude}
  *
  * Observation layout (must match envs/drone_env.py):
@@ -23,7 +24,9 @@
  *   [3:6]   velocity  (m/s)
  *   [6:10]  quaternion [w, x, y, z]
  *   [10:13] angular velocity (rad/s)
- *   [13:17] previous motor actions
+ *   [13]    yaw_err  (rad)  ← DO NOT SKIP
+ *   [14:18] previous motor actions
+ *   Total: 18 dimensions
  *
  * Motor order: [FL(CCW), FR(CW), BL(CW), BR(CCW)]
  *
@@ -119,7 +122,7 @@ void cf_to_quat(float* qw, float* qx, float* qy, float* qz) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Build observation vector (MODEL_OBS_DIM = 17)
+// Build observation vector (MODEL_OBS_DIM = 18)
 // ─────────────────────────────────────────────────────────────────────────────
 void build_obs(float* obs) {
     float qw, qx, qy, qz;
@@ -138,10 +141,13 @@ void build_obs(float* obs) {
     obs[10] = imu_gx;
     obs[11] = imu_gy;
     obs[12] = imu_gz;
-    obs[13] = prev_action[0];
-    obs[14] = prev_action[1];
-    obs[15] = prev_action[2];
-    obs[16] = prev_action[3];
+    // yaw_err: arctan2(sin(yaw - target_yaw), cos(yaw - target_yaw))
+    float yaw_diff = cf_yaw - target_yaw;
+    obs[13] = atan2f(sinf(yaw_diff), cosf(yaw_diff));
+    obs[14] = prev_action[0];
+    obs[15] = prev_action[1];
+    obs[16] = prev_action[2];
+    obs[17] = prev_action[3];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -318,9 +324,19 @@ void loop() {
         memcpy(wp, buf, 16);
 
         bool valid = !isnan(wp[0]) && !isnan(wp[1]) && !isnan(wp[2]) && !isnan(wp[3]);
-        bool kill  = valid && wp[2] < 0.0f;   // z < 0 = kill signal from rc_control.py
 
-        if (kill) {
+        if (valid && wp[2] < -1.5f) {
+            // z = -2.0: IMU recalibration request
+            Serial.println("[UDP] IMU recalibration requested – keep drone still!");
+            stop_motors();
+            armed = false;
+            imu.calibrateAccelGyro();
+            Serial.println("[CAL] Done. Power-cycle or reflash to re-arm.");
+            return;
+        }
+
+        if (valid && wp[2] < 0.0f) {
+            // z = -1.0: kill signal
             Serial.println("[UDP] Kill signal received.");
             stop_motors();
             armed = false;
@@ -337,6 +353,16 @@ void loop() {
             while (ty < -M_PI) ty += 2.0f * M_PI;
             target_yaw = ty;
             last_wp_ms = now;
+        }
+    }
+
+    // Waypoint timeout warning (non-fatal – hold last known target)
+    if (armed && last_wp_ms > 0 && (now - last_wp_ms) > WP_TIMEOUT_MS) {
+        static unsigned long last_warn_ms = 0;
+        if (now - last_warn_ms > 1000) {  // warn once per second
+            last_warn_ms = now;
+            Serial.printf("[WARN] No waypoint for %lu ms – holding last target z=%.2f\n",
+                          now - last_wp_ms, target_pos[2]);
         }
     }
 

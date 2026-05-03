@@ -170,7 +170,8 @@ def train(config_path: str = None, resume_path: str = None):
         net_arch=dict(
             pi=ppo_cfg["net_arch_pi"],
             vf=ppo_cfg["net_arch_vf"],
-        )
+        ),
+        log_std_init=-1.5,  # std≈0.22 – keeps early throttle variation small
     )
 
     if resume_path:

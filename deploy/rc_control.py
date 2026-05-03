@@ -28,6 +28,7 @@ Klavye:
     W / S    → İleri / Geri    (target_x)
     A / D    → Sol  / Sağ     (target_y)
     Q / E    → Yukarı / Aşağı  (target_z)
+    K        → IMU kalibrasyon  (drone düz + hareketsiz iken bas)
     SPACE    → target_pos dondur (hover in place)
     R        → Home – target'ı [0,0,target_z]'ye sıfırla
     X / ESC  → Acil durdur (motorları kes)
@@ -58,18 +59,28 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
-STEP     = 0.10    # m per control loop tick (at 50 Hz, held key → 5 m/s max)
-YAW_STEP = 0.052   # rad per tick  ≈ 3°/tick  (held key → ~150°/s at 50 Hz)
-FREQ     = 50.0    # Hz
+STEP        = 0.10    # m per control loop tick (at 50 Hz, held key → 5 m/s max)
+YAW_STEP    = 0.052   # rad per tick  ≈ 3°/tick  (held key → ~150°/s at 50 Hz)
+FREQ        = 50.0    # Hz
+CARROT_STEP = 0.04    # m per tick — carrot speed ~2 m/s at 50 Hz
+_MOVE_KEYS  = {'w', 's', 'a', 'd', 'q', 'e'}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared state
 # ─────────────────────────────────────────────────────────────────────────────
-target     = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-target_yaw = 0.0   # radians, wrapped to [-π, π]
-pressed    = set()
-running    = True
+final_target = np.array([0.0, 0.0, 1.0], dtype=np.float32)  # klavye hedefi
+target       = np.array([0.0, 0.0, 1.0], dtype=np.float32)  # carrot: final_target'e dogru ilerler
+target_yaw   = 0.0   # radians, wrapped to [-π, π]
+pressed      = set()
+running      = True
+
+# IMU kalibrasyon durumu (mutable sözlük – global bildirimi gerektirmez)
+_state = {
+    'cal_flag':      False,
+    'gyro_bias':     np.zeros(3, dtype=np.float32),   # gyro sıfır-hız ofset
+    'accel_bias_xy': np.zeros(2, dtype=np.float32),   # ivmeölçer XY ofset (Z'de yerçekimi var)
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -92,7 +103,7 @@ def on_release(key):
 
 def process_keys() -> bool:
     """
-    Update target based on currently pressed keys.
+    Update final_target based on currently pressed keys.
     Returns True if a kill command was issued.
     """
     global running, target_yaw
@@ -105,24 +116,31 @@ def process_keys() -> bool:
         running = False
         return True
 
-    # Freeze (space bar)
+    # Freeze (space bar) – no movement update, carrot will freeze naturally
     if ' ' in pressed:
         return False
 
     # Home
     if 'r' in pressed:
-        target[0]  = 0.0
-        target[1]  = 0.0
-        target_yaw = 0.0
+        final_target[0] = 0.0
+        final_target[1] = 0.0
+        target[0]       = 0.0
+        target[1]       = 0.0
+        target_yaw      = 0.0
         return False
 
-    # Movement
-    if 'w' in pressed:  target[0] += STEP
-    if 's' in pressed:  target[0] -= STEP
-    if 'a' in pressed:  target[1] += STEP
-    if 'd' in pressed:  target[1] -= STEP
-    if 'q' in pressed:  target[2] += STEP
-    if 'e' in pressed:  target[2] -= STEP
+    # IMU kalibrasyon (K) – drone düz ve hareketsizken bas
+    if 'k' in pressed and not _state['cal_flag']:
+        _state['cal_flag'] = True
+        print("\n[CAL] Kalibrasyon başlatıldı – drone DÜZ ve HAREKETSIZ olmalı (~2 s)")
+
+    # Movement – update final_target (carrot advances toward this)
+    if 'w' in pressed:  final_target[0] += STEP
+    if 's' in pressed:  final_target[0] -= STEP
+    if 'a' in pressed:  final_target[1] += STEP
+    if 'd' in pressed:  final_target[1] -= STEP
+    if 'q' in pressed:  final_target[2] += STEP
+    if 'e' in pressed:  final_target[2] -= STEP
 
     # Yaw  (Z = CCW / left,  C = CW / right)
     if 'z' in pressed:  target_yaw -= YAW_STEP
@@ -130,8 +148,22 @@ def process_keys() -> bool:
     target_yaw = float(np.arctan2(np.sin(target_yaw), np.cos(target_yaw)))
 
     # Altitude floor
-    target[2] = max(0.15, target[2])
+    final_target[2] = max(0.15, final_target[2])
     return False
+
+
+def advance_carrot():
+    """Hareket tusu basiliyken carrot'u (target) final_target'e dogru ilerlet.
+    Tus birakildiginda final_target mevcut carrot konumuna snap'lenir (drone durur)."""
+    if not (pressed & _MOVE_KEYS):
+        final_target[:] = target
+        return
+    delta = final_target - target
+    dist  = float(np.linalg.norm(delta))
+    if dist <= CARROT_STEP:
+        target[:] = final_target
+    else:
+        target[:] += (delta / dist) * CARROT_STEP
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,16 +176,23 @@ def run_esp32_mode(esp32_ip: str, esp32_port: int, local_port: int):
     sock.settimeout(0.02)
 
     print(f"\n[RC] ESP32-standalone mode  →  {esp32_ip}:{esp32_port}")
-    print("[RC] W/S=fwd/bck  A/D=left/right  Q/E=up/dn  Z/C=yaw  SPC=freeze  R=home  X/ESC=kill\n")
+    print("[RC] W/S=fwd/bck  A/D=left/right  Q/E=up/dn  Z/C=yaw  K=calibIMU  SPC=freeze  R=home  X/ESC=kill\n")
 
     dt = 1.0 / FREQ
 
     while running:
         t0   = time.monotonic()
         kill = process_keys()
+        advance_carrot()
+
+        # IMU kalibrasyon sinyali – ESP32 firmware'i z=-2.0 sentinel'ini desteklemeli
+        if _state['cal_flag']:
+            _state['cal_flag'] = False
+            pkt_cal = struct.pack("4f", 0.0, 0.0, -2.0, 0.0)
+            sock.sendto(pkt_cal, (esp32_ip, esp32_port))
+            print("\n[CAL] Kalibrasyon komutu ESP32'ye gönderildi (z=-2.0 sentinel)")
 
         if kill:
-            # Send kill signal: z = -1.0 is the kill sentinel
             pkt = struct.pack("4f", 0.0, 0.0, -1.0, 0.0)
             for _ in range(20):
                 sock.sendto(pkt, (esp32_ip, esp32_port))
@@ -164,7 +203,9 @@ def run_esp32_mode(esp32_ip: str, esp32_port: int, local_port: int):
         sock.sendto(pkt, (esp32_ip, esp32_port))
 
         print(
-            f"  target=[{target[0]:+.2f}, {target[1]:+.2f}, z={target[2]:.2f}]  yaw={np.degrees(target_yaw):+.0f}\u00b0  ",
+            f"  C[{target[0]:+.2f},{target[1]:+.2f},z={target[2]:.2f}]"
+            f"  G[{final_target[0]:+.2f},{final_target[1]:+.2f},z={final_target[2]:.2f}]"
+            f"  yaw={np.degrees(target_yaw):+.0f}°  ",
             end="\r",
         )
 
@@ -220,6 +261,9 @@ def run_pc_mode(
     prev_action  = np.ones(4, dtype=np.float32) * WhoopDroneEnv.HOVER_THROTTLE
     last_sensor  = 0.0
 
+    cal_buf = []         # ham IMU ornekleri kalibrasyon icin
+    CAL_N   = 100        # ~2 s @ 50 Hz
+
     def recv_sensor():
         nonlocal last_sensor, position, ang_vel
         try:
@@ -228,12 +272,40 @@ def run_pc_mode(
             return False
         if len(data) < 28:
             return False
-        ax, ay, az, gx, gy, gz, altitude = struct.unpack_from("7f", data)
+        ax_r, ay_r, az_r, gx_r, gy_r, gz_r, altitude = struct.unpack_from("7f", data)
         now = time.monotonic()
         dt  = now - last_sensor if last_sensor > 0 else 0.005
         last_sensor = now
+
+        # Kalibrasyon: ham veri topla
+        if _state['cal_flag']:
+            if len(cal_buf) == 0:
+                print("\n[CAL] IMU ornekleri toplanıyor – drone hareketsiz tutun...")
+            cal_buf.append([ax_r, ay_r, az_r, gx_r, gy_r, gz_r])
+            if len(cal_buf) >= CAL_N:
+                arr = np.array(cal_buf, dtype=np.float32)
+                _state['gyro_bias'][:]     = arr[:, 3:6].mean(axis=0)
+                _state['accel_bias_xy'][:] = arr[:, 0:2].mean(axis=0)
+                cal_buf.clear()
+                _state['cal_flag'] = False
+                gb = _state['gyro_bias']
+                ab = _state['accel_bias_xy']
+                print(
+                    f"\n[CAL] Tamamlandı  "
+                    f"gyro=[{gb[0]:+.4f},{gb[1]:+.4f},{gb[2]:+.4f}]  "
+                    f"accel_xy=[{ab[0]:+.4f},{ab[1]:+.4f}]"
+                )
+
+        # Bias düzeltmesini uygula
+        ax = ax_r - _state['accel_bias_xy'][0]
+        ay = ay_r - _state['accel_bias_xy'][1]
+        az = az_r   # Z düzeltilmez – yerçekimi içeriyor
+        gx = gx_r - _state['gyro_bias'][0]
+        gy = gy_r - _state['gyro_bias'][1]
+        gz = gz_r - _state['gyro_bias'][2]
+
         cf.update(ax, ay, az, gx, gy, gz, dt)
-        ang_vel[:]  = [gx, gy, gz]
+        ang_vel[:] = [gx, gy, gz]
         position[2] = float(altitude)
         return True
 
@@ -254,7 +326,7 @@ def run_pc_mode(
         return np.degrees(2.0 * np.arccos(np.clip(abs(w), 0.0, 1.0))) < 50.0
 
     print(f"\n[RC] PC-model mode  →  {esp32_ip}:{esp32_port}")
-    print("[RC] W/S=fwd/bck  A/D=left/right  Q/E=up/dn  Z/C=yaw  SPC=freeze  R=home  X/ESC=kill\n")
+    print("[RC] W/S=fwd/bck  A/D=left/right  Q/E=up/dn  Z/C=yaw  K=calibIMU  SPC=freeze  R=home  X/ESC=kill\n")
 
     dt = 1.0 / FREQ
 
@@ -262,6 +334,7 @@ def run_pc_mode(
         while running:
             t0   = time.monotonic()
             kill = process_keys()
+            advance_carrot()
             if kill:
                 break
 
@@ -291,9 +364,11 @@ def run_pc_mode(
                 prev_action[:] = action
 
                 print(
-                    f"  z={position[2]:.2f}m  tgt={target[2]:.2f}m  "
-                    f"yaw={np.degrees(cf.yaw):+.0f}\u00b0  "
-                    f"M=[{action[0]:.2f},{action[1]:.2f},{action[2]:.2f},{action[3]:.2f}]  ",
+                    f"  z={position[2]:.2f}m"
+                    f"  C[{target[0]:+.2f},{target[1]:+.2f},z={target[2]:.2f}]"
+                    f"  G[{final_target[0]:+.2f},{final_target[1]:+.2f}]"
+                    f"  yaw={np.degrees(cf.yaw):+.0f}°"
+                    f"  M=[{action[0]:.2f},{action[1]:.2f},{action[2]:.2f},{action[3]:.2f}]  ",
                     end="\r",
                 )
 
@@ -328,7 +403,8 @@ def main():
     parser.add_argument("--target-z",   type=float, default=1.0,  help="Initial hover altitude (m)")
     args = parser.parse_args()
 
-    target[2] = max(0.15, args.target_z)
+    target[2]       = max(0.15, args.target_z)
+    final_target[2] = max(0.15, args.target_z)
 
     if not HAS_PYNPUT:
         print("ERROR: pynput is required.  pip install pynput")

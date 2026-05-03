@@ -7,9 +7,12 @@ Observation (18-dim):
     [6:10] orientation quaternion [w, x, y, z]    (body frame)
     [10:13] angular velocity (world frame, rad/s)
     [13]   yaw error        (rad)                  : yaw − target_yaw, ∈ [−π, π]
-    [14:18] previous motor actions                 ∈ [0, 1]
+    [14:18] previous motor DELTA actions           ∈ [−0.5, 0.5]
 
-Action (4-dim): motor throttles [FL, FR, BL, BR] ∈ [0, 1]
+Action (4-dim): motor throttle DELTAS [FL, FR, BL, BR] ∈ [−0.5, 0.5]
+    Actual throttle = HOVER_THROTTLE + action, clipped to [0, 1].
+    An untrained zero-output policy produces hover throttle on every motor,
+    guaranteeing the drone stays airborne during initial exploration.
     FL = front-left  (CCW),  FR = front-right (CW)
     BL = back-left   (CW),   BR = back-right  (CCW)
 
@@ -45,7 +48,7 @@ class WhoopDroneEnv(gym.Env):
 
     # ── Termination thresholds ──────────────────────────────────────────────
     CRASH_Z       = 0.03    # m   – below this height = crash
-    FLIP_W        = 0.30    # quat w – below this ≈ tilt > 107°
+    FLIP_UP_Z     = 0.0     # body-up z-component in world frame – below 0 means tilted > 90° (true flip)
     MAX_RANGE_XY  = 10.0    # m   – max horizontal distance from origin
     MAX_Z         = 20.0    # m   – max altitude
 
@@ -54,7 +57,7 @@ class WhoopDroneEnv(gym.Env):
         render_mode: Optional[str] = None,
         target_pos: Optional[np.ndarray] = None,
         target_yaw: float = 0.0,
-        max_episode_steps: int = 1000,
+        max_episode_steps: int = 2000,
     ):
         super().__init__()
 
@@ -79,14 +82,14 @@ class WhoopDroneEnv(gym.Env):
         self.max_episode_steps = max_episode_steps
 
         # ── Spaces ───────────────────────────────────────────────────────────
-        # Observation: pos_err(3) + vel(3) + quat(4) + ang_vel(3) + prev_act(4)
+        # Observation: pos_err(3) + vel(3) + quat(4) + ang_vel(3) + prev_delta_act(4)
         obs_low  = np.array(
             [-5,  -5,  -3,          # pos error
              -10, -10, -10,         # linear velocity
              -1,  -1,  -1,  -1,    # quaternion
              -50, -50, -50,         # angular velocity
              -np.pi,                # yaw error
-              0,   0,   0,   0],    # prev action
+             -0.5, -0.5, -0.5, -0.5],  # prev delta action
             dtype=np.float32,
         )
         obs_high = np.array(
@@ -95,16 +98,18 @@ class WhoopDroneEnv(gym.Env):
                1,   1,   1,  1,
               50,  50,  50,
               np.pi,
-               1,   1,   1,  1],
+               0.5,  0.5,  0.5,  0.5],
             dtype=np.float32,
         )
         self.observation_space = spaces.Box(obs_low, obs_high, dtype=np.float32)
+        # Delta actions: actual throttle = HOVER_THROTTLE + action, clipped to [0,1].
+        # Zero-output (untrained) policy → all motors at hover throttle → stable hover.
         self.action_space      = spaces.Box(
-            low=0.0, high=1.0, shape=(4,), dtype=np.float32
+            low=-0.5, high=0.5, shape=(4,), dtype=np.float32
         )
 
         # ── Internal state ───────────────────────────────────────────────────
-        self._prev_action  = np.ones(4, dtype=np.float32) * self.HOVER_THROTTLE
+        self._prev_action  = np.zeros(4, dtype=np.float32)  # prev delta action
         self._step_count   = 0
 
         # ── Rendering ────────────────────────────────────────────────────────
@@ -156,14 +161,10 @@ class WhoopDroneEnv(gym.Env):
         # Crashed into ground
         if pos[2] < self.CRASH_Z:
             return True, False
-        # Flipped over
-        if abs(quat[0]) < self.FLIP_W:
-            return True, False
-        # Out of bounds – horizontal
-        if np.any(np.abs(pos[:2]) > self.MAX_RANGE_XY):
-            return True, False
-        # Out of bounds – altitude
-        if pos[2] > self.MAX_Z:
+        # Flipped over – tilt check, yaw-independent
+        # up_z = z-component of body up-vector in world frame = 1 - 2*(qx²+qy²)
+        up_z = 1.0 - 2.0 * (quat[1]**2 + quat[2]**2)
+        if up_z < self.FLIP_UP_Z:
             return True, False
         # Time limit
         if self._step_count >= self.max_episode_steps:
@@ -182,13 +183,17 @@ class WhoopDroneEnv(gym.Env):
         pos_err = pos - self.target_pos
         dist    = float(np.linalg.norm(pos_err))
 
-        # --- Position reward: exponential so gradient doesn't vanish far away
-        r_pos = float(np.exp(-2.0 * dist**2)) - 1.0           # ∈ [-1, 0]
+        # --- Position reward: linear penalty, extra push when very far
+        #     r_pos ∈ [-2, 0]: -dist/5 for dist≤5, additional -1*(dist-5)/10 beyond 5m
+        #     keeps gradient alive at large distances so drone returns even without OOB termination
+        r_pos = -(min(dist, 5.0) / 5.0)                        # ∈ [-1, 0]
+        if dist > 5.0:
+            r_pos -= (dist - 5.0) / 10.0                       # extra linear push back
 
-        # --- Upright orientation reward (w=1 → level flight)
-        #     r_orient =  1 when perfectly upright,  -1 when fully inverted
-        w          = float(quat[0])
-        r_orient   = 2.0 * w * w - 1.0                        # ∈ [-1,  1]
+        # --- Upright orientation reward – yaw-independent
+        #     up_z = 1 when level, 0 at 90° tilt, -1 upside-down
+        up_z     = 1.0 - 2.0 * (float(quat[1])**2 + float(quat[2])**2)
+        r_orient = up_z                                        # ∈ [-1,  1]
 
         # --- Velocity penalty (encourages hovering, not drifting)
         r_vel      = -0.10 * float(np.sum(vel**2))
@@ -212,7 +217,10 @@ class WhoopDroneEnv(gym.Env):
         # --- Crash penalty
         r_crash    = -100.0 if pos[2] < self.CRASH_Z else 0.0
 
-        return r_pos + r_orient + r_vel + r_angvel + r_yaw + r_smooth + r_alive + r_crash
+        # --- Flip penalty – same tilt check as _check_termination()
+        r_flip     = -100.0 if up_z < self.FLIP_UP_Z else 0.0
+
+        return r_pos + r_orient + r_vel + r_angvel + r_yaw + r_smooth + r_alive + r_crash + r_flip
 
     # ════════════════════════════════════════════════════════════════════════
     # Gymnasium API
@@ -238,7 +246,8 @@ class WhoopDroneEnv(gym.Env):
         self.target_yaw = float(rng.uniform(-np.pi, np.pi))
 
         # ── Random initial yaw + small tilt ──────────────────────────────────
-        init_yaw     = float(rng.uniform(-np.pi, np.pi))
+        # Limit to ±π/4 – full ±π caused instant flips from large yaw-error torques
+        init_yaw     = float(rng.uniform(-np.pi / 4, np.pi / 4))
         cy, sy       = np.cos(init_yaw / 2.0), np.sin(init_yaw / 2.0)
         q_yaw        = np.array([cy, 0.0, 0.0, sy])
         tilt         = rng.uniform(-0.05, 0.05, 3)
@@ -262,17 +271,18 @@ class WhoopDroneEnv(gym.Env):
         self.data.qvel[:] = rng.uniform(-0.05, 0.05, self.model.nv)
 
         # ── Reset tracking state ─────────────────────────────────────────────
-        self._prev_action[:] = self.HOVER_THROTTLE
+        self._prev_action[:] = 0.0  # zero delta = hover throttle
         self._step_count      = 0
 
         mujoco.mj_forward(self.model, self.data)
         return self._get_obs(), self._get_info()
 
     def step(self, action: np.ndarray):
-        action = np.clip(np.asarray(action, dtype=np.float32), 0.0, 1.0)
+        action = np.clip(np.asarray(action, dtype=np.float32), -0.5, 0.5)
 
-        # Apply motor commands and advance simulation
-        self.data.ctrl[:] = action
+        # Convert delta action to absolute throttle and apply
+        throttle = np.clip(self.HOVER_THROTTLE + action, 0.0, 1.0)
+        self.data.ctrl[:] = throttle
         for _ in range(self.N_SUBSTEPS):
             mujoco.mj_step(self.model, self.data)
 

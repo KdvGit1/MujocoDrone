@@ -2,16 +2,22 @@
 mujoco>=3.1.0
 gymnasium>=0.29.0
 stable-baselines3>=2.3.0
-shimmy>=0.2.0       # gym-gymnasium compatibility shim required by SB3
+shimmy>=0.2.0           # gym-gymnasium compatibility shim required by SB3
 numpy>=1.26.0
-scipy>=1.12.0
 pyyaml>=6.0
 
+# ── PyTorch (CPU) ────────────────────────────────────────────────────────────
+# stable-baselines3 requires torch; CPU version is enough for inference.
+# For GPU training (cuda/train_full_cuda.py) install the CUDA build manually:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+torch>=2.2.0
+
 # ── Deployment ───────────────────────────────────────────────────────────────
-pynput>=1.7.0       # keyboard control for rc_control.py
+pynput>=1.7.0           # keyboard control for rc_control.py / test_manual.py
 
 # ── Logging / visualisation ─────────────────────────────────────────────────
 tensorboard>=2.16.0
-rich>=13.0.0        # progress bars in stable-baselines3
-imageio>=2.34.0     # optional – video export from evaluate.py
-imageio-ffmpeg>=0.4.9  # optional – ffmpeg backend for imageio
+matplotlib>=3.8.0       # live training plot in train_stage3_v2.py
+rich>=13.0.0            # progress bars in stable-baselines3
+imageio>=2.34.0         # optional – video export from evaluate.py
+imageio-ffmpeg>=0.4.9   # optional – ffmpeg backend for imageio
